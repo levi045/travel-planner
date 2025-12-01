@@ -846,37 +846,67 @@ const HeaderControls = ({ onPlacePreview, onMenuClick }: { onPlacePreview: (plac
     );
 };
 
+// 請把原本的 Sidebar 元件整段換成這個
 const Sidebar = ({ isOpen, onClose }: { isOpen: boolean; onClose: () => void }) => {
     const { trips, activeTripId, createTrip, switchTrip, deleteTrip, trips: allTrips, importData } = useStore();
-    const fileInputRef = useRef<HTMLInputElement>(null);
+    const [isLoading, setIsLoading] = useState(false);
 
-    const handleExport = () => {
-        const dataStr = JSON.stringify(allTrips);
-        const dataUri = 'data:application/json;charset=utf-8,'+ encodeURIComponent(dataStr);
-        const exportFileDefaultName = 'my_travel_backup.json';
-        const linkElement = document.createElement('a');
-        linkElement.setAttribute('href', dataUri);
-        linkElement.setAttribute('download', exportFileDefaultName);
-        linkElement.click();
+    // ✨ 新功能：儲存到雲端 (電腦端按這個)
+    const handleSaveToCloud = async () => {
+        setIsLoading(true);
+        try {
+            // 我們把目前的 allTrips 整包存上去
+            const response = await fetch('/api/save-plan', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ plan: allTrips }),
+            });
+
+            if (response.ok) {
+                alert('☁️ 成功！行程已儲存到雲端，手機上可以看囉！');
+            } else {
+                const err = await response.json();
+                alert('儲存失敗：' + (err.error || '未知錯誤'));
+            }
+        } catch (error) {
+            console.error(error);
+            alert('網路錯誤，無法儲存');
+        } finally {
+            setIsLoading(false);
+        }
     };
 
-    const handleImport = (event: React.ChangeEvent<HTMLInputElement>) => {
-        const fileReader = new FileReader();
-        if (event.target.files && event.target.files.length > 0) {
-            fileReader.readAsText(event.target.files[0], "UTF-8");
-            fileReader.onload = (e) => {
-                if(e.target && typeof e.target.result === 'string') {
-                    try {
-                        const parsedData = JSON.parse(e.target.result);
-                        if (Array.isArray(parsedData)) {
-                            importData(parsedData);
-                            alert("行程匯入成功！");
-                        }
-                    } catch (error) {
-                        alert("檔案格式錯誤，請確認是正確的 JSON 備份檔。");
-                    }
+    // ✨ 新功能：從雲端讀取 (手機端按這個)
+    const handleLoadFromCloud = async () => {
+        if (!confirm('確定要從雲端讀取嗎？這會覆蓋目前的進度喔！')) return;
+        
+        setIsLoading(true);
+        try {
+            const response = await fetch('/api/get-plans');
+            const data = await response.json();
+            
+            // 檢查回傳的資料結構，取出最新的一筆
+            // 根據我們之前的 API，資料是在 data.plans[0].content (或是 data.plans[0].data)
+            if (data.plans && data.plans.length > 0) {
+                // 這裡要對應資料庫欄位，如果是用 Neon 範例通常是 'content' 或 'data'
+                // 我們做個保險，兩個都檢查
+                const latestPlan = data.plans[0].content || data.plans[0].data;
+                
+                if (latestPlan) {
+                    importData(latestPlan); // 更新 Zustand 狀態
+                    alert('✨ 行程同步完成！');
+                    onClose(); // 關閉側邊欄
+                } else {
+                    alert('讀取到的資料格式怪怪的');
                 }
-            };
+            } else {
+                alert('雲端目前沒有存檔喔！');
+            }
+        } catch (error) {
+            console.error(error);
+            alert('讀取失敗，請檢查網路');
+        } finally {
+            setIsLoading(false);
         }
     };
 
@@ -898,19 +928,31 @@ const Sidebar = ({ isOpen, onClose }: { isOpen: boolean; onClose: () => void }) 
                 ))}
                 <button onClick={createTrip} className="w-full py-3 mt-2 border-2 border-dashed border-gray-300 text-gray-500 rounded-lg flex items-center justify-center gap-2 hover:border-blue-500 hover:text-blue-600 transition-colors font-medium"><FilePlus size={18} /> 建立新行程</button>
                 
+                {/* ✨ 雲端同步區塊 (取代原本的匯入匯出) */}
                 <div className="mt-4 pt-4 border-t border-gray-100">
-                    <h3 className="text-xs font-bold text-gray-400 uppercase mb-2">資料備份</h3>
-                    <div className="grid grid-cols-2 gap-2">
-                        <button onClick={handleExport} className="flex flex-col items-center justify-center p-2 bg-gray-50 hover:bg-blue-50 border border-gray-200 hover:border-blue-200 rounded-lg transition-all text-gray-600 hover:text-blue-600">
-                            <Download size={16} className="mb-1"/>
-                            <span className="text-xs font-medium">匯出行程</span>
+                    <h3 className="text-xs font-bold text-gray-400 uppercase mb-2">雲端同步</h3>
+                    <div className="flex flex-col gap-2">
+                        <button 
+                            onClick={handleSaveToCloud} 
+                            disabled={isLoading}
+                            className="flex items-center justify-center gap-2 p-3 bg-blue-50 hover:bg-blue-100 text-blue-700 rounded-lg transition-all font-bold shadow-sm disabled:opacity-50"
+                        >
+                            {isLoading ? <Loader2 size={16} className="animate-spin"/> : <Upload size={16} />}
+                            儲存到雲端
                         </button>
-                        <button onClick={() => fileInputRef.current?.click()} className="flex flex-col items-center justify-center p-2 bg-gray-50 hover:bg-green-50 border border-gray-200 hover:border-green-200 rounded-lg transition-all text-gray-600 hover:text-green-600">
-                            <Upload size={16} className="mb-1"/>
-                            <span className="text-xs font-medium">匯入行程</span>
+
+                        <button 
+                            onClick={handleLoadFromCloud} 
+                            disabled={isLoading}
+                            className="flex items-center justify-center gap-2 p-3 bg-gray-50 hover:bg-green-50 text-gray-600 hover:text-green-700 rounded-lg transition-all font-medium border border-gray-200 disabled:opacity-50"
+                        >
+                            {isLoading ? <Loader2 size={16} className="animate-spin"/> : <Download size={16} />}
+                            從雲端讀取 (手機用)
                         </button>
-                        <input type="file" ref={fileInputRef} className="hidden" accept=".json" onChange={handleImport} />
                     </div>
+                    <p className="text-[10px] text-gray-400 mt-2 text-center">
+                        電腦按「儲存」後，用手機打開網頁按「讀取」即可同步。
+                    </p>
                 </div>
             </div>
         </div>
