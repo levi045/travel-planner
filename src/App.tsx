@@ -5,7 +5,7 @@ import { arrayMove, SortableContext, sortableKeyboardCoordinates, verticalListSo
 import { CSS } from '@dnd-kit/utilities';
 import { GripVertical, Navigation, ExternalLink, MapPin, Calendar as CalendarIcon, Search, Plus, Trash2, Sun, CloudRain, CloudSun, Loader2, Layout, FolderOpen, FilePlus, X, Menu, CloudFog, CloudLightning, Snowflake, Plane, PlaneTakeoff, PlaneLanding, Wand2, ChevronDown, ChevronUp, Link as LinkIcon, Tag, Star, Edit3, Map as MapIcon, List, CheckSquare, Check, ArrowLeft, Hotel, Copy, Bookmark, RefreshCcw, FolderHeart, Heart, Eye, EyeOff, Flag, Utensils, Coffee, ShoppingBag } from 'lucide-react';
 import { create } from 'zustand';
-import { persist } from 'zustand/middleware';
+// 注意：我們移除了 'zustand/middleware' 的 persist，因為要改用雲端同步
 
 // --- 0. 設定與常數 ---
 const LIBRARIES: ("places")[] = ["places"];
@@ -107,6 +107,12 @@ interface ItineraryStore {
   collections: Collection[]; 
   viewMode: 'day' | 'checklist' | 'collections'; 
   
+  // ✨ 新增：雲端同步相關狀態與方法
+  currentProfile: 'admin' | 'visitor' | null;
+  isSyncing: boolean;
+  setProfileAndLoad: (profile: 'admin' | 'visitor') => Promise<void>;
+  saveToCloud: () => Promise<void>;
+
   setViewMode: (mode: 'day' | 'checklist' | 'collections') => void;
 
   // Trip Management
@@ -188,14 +194,66 @@ const INITIAL_TRIPS: Trip[] = [
   }
 ];
 
-const useStore = create<ItineraryStore>()(
-  persist(
-    (set, get) => ({
+// ✨ 重寫 Store 建立邏輯，移除 persist middleware，加入 API 呼叫
+const useStore = create<ItineraryStore>((set, get) => ({
       trips: INITIAL_TRIPS,
       activeTripId: INITIAL_TRIP_ID,
       savedCategories: DEFAULT_CATEGORIES,
       collections: [],
       viewMode: 'day',
+      
+      // ✨ 雲端同步狀態
+      currentProfile: null,
+      isSyncing: false,
+
+      // ✨ 登入並讀取資料
+      setProfileAndLoad: async (profile) => {
+          set({ currentProfile: profile, isSyncing: true });
+          try {
+              console.log(`正在讀取 ${profile} 的資料...`);
+              const res = await fetch(`/api/sync?profileId=${profile}`);
+              
+              if (!res.ok) {
+                  throw new Error(`Server responded with ${res.status}`);
+              }
+              
+              const data = await res.json();
+              
+              if (data && Array.isArray(data) && data.length > 0) {
+                  console.log("雲端資料匯入成功！", data);
+                  // 使用 importData 來更新 state
+                  get().importData(data);
+              } else {
+                  console.log("雲端無資料，使用預設值");
+              }
+          } catch (e) {
+              console.error("雲端讀取錯誤:", e);
+              // 錯誤時不做中斷，讓使用者可以先用預設值操作，只是可能無法存檔
+          } finally {
+              set({ isSyncing: false });
+          }
+      },
+
+      // ✨ 儲存資料到雲端
+      saveToCloud: async () => {
+          const { currentProfile, trips } = get();
+          if (!currentProfile) return;
+
+          set({ isSyncing: true });
+          try {
+              const res = await fetch('/api/sync?profileId=' + currentProfile, {
+                  method: 'POST',
+                  headers: { 'Content-Type': 'application/json' },
+                  body: JSON.stringify({ data: trips }) // 包裝資料
+              });
+              if (!res.ok) throw new Error('儲存失敗');
+              console.log("雲端儲存成功！");
+          } catch (e) {
+              console.error("雲端儲存錯誤:", e);
+          } finally {
+              set({ isSyncing: false });
+          }
+      },
 
       setViewMode: (mode) => set({ viewMode: mode }),
 
@@ -492,12 +550,9 @@ const useStore = create<ItineraryStore>()(
           trips: newTrips,
           activeTripId: newTrips.length > 0 ? newTrips[0].id : INITIAL_TRIP_ID
       }))
-    }),
-    { name: 'travel-planner-storage-v29' } 
-  )
-);
+}));
 
-// --- 2. API 與 輔助功能 ---
+// --- 2. API 與 輔助功能 (保持不變) ---
 
 const getMarkerColor = (category: string) => {
     const map: Record<string, string> = {
@@ -636,7 +691,7 @@ const useWeather = (lat: number, lng: number, dateStr: string, dayOffset: number
     return { weather, loading, autoLocationName };
 };
 
-// --- 3. UI 元件 ---
+// --- 3. UI 元件 (保持不變) ---
 
 const SmartTimeInput = ({ value, onChange, placeholder, className }: { value: string, onChange: (val: string) => void, placeholder?: string, className?: string }) => {
     const handleKeyDown = (e: React.KeyboardEvent<HTMLInputElement>) => {
@@ -715,7 +770,6 @@ const CollectionSelector = ({ spot, onClose }: { spot: Spot, onClose: () => void
     const { collections, addToCollection, removeFromCollection, createCollection } = useStore();
     const [newColName, setNewColName] = useState("");
     
-    // ✨ FIX: 這裡的 spot.location 必須存在。如果 spot 是從地圖點擊傳來的，要確保資料結構正確。
     const checkInCollection = (colId: string) => {
         const col = collections.find(c => c.id === colId);
         if (!col || !spot.location) return false;
@@ -723,7 +777,7 @@ const CollectionSelector = ({ spot, onClose }: { spot: Spot, onClose: () => void
     };
 
     const handleToggle = (colId: string) => {
-        if (!spot.location) return; // 防呆
+        if (!spot.location) return; 
         const isCollected = checkInCollection(colId);
         if (isCollected) {
             removeFromCollection(colId, spot.name, spot.location.lat, spot.location.lng);
@@ -791,7 +845,6 @@ const CustomInfoWindow = ({
                             <Heart size={16} fill={isCollected ? "currentColor" : "none"} />
                         </button>
                     )}
-                    {/* ✨ Fix 2: 只有在 explicitly passed onDelete 時才顯示垃圾桶 */}
                     {onDelete && (
                         <button onClick={onDelete} className="p-1 rounded text-gray-300 hover:text-red-500 hover:bg-red-50 transition-colors" title="刪除">
                             <Trash2 size={16}/>
@@ -975,12 +1028,11 @@ const HeaderControls = ({ onPlacePreview, onMenuClick }: { onPlacePreview: (plac
     );
 };
 
-// ✨ 收藏夾面板 (包含展開功能)
 const CollectionsPanel = () => {
     const { collections, createCollection, deleteCollection, toggleCollectionVisibility, removeFromCollection, updateCollectionSpot, setViewMode } = useStore();
     const [newName, setNewName] = useState("");
     const [selectedIcon, setSelectedIcon] = useState("star");
-    const [expandedSpots, setExpandedSpots] = useState<Record<string, boolean>>({}); // 控制展開
+    const [expandedSpots, setExpandedSpots] = useState<Record<string, boolean>>({}); 
 
     const colors = ['#EF4444', '#F97316', '#EAB308', '#22C55E', '#3B82F6', '#A855F7', '#EC4899'];
     
@@ -1065,7 +1117,6 @@ const CollectionsPanel = () => {
                                                     <X size={12}/>
                                                 </button>
                                             </div>
-                                            {/* ✨ 3. 收藏景點展開編輯功能 */}
                                             {isExpanded && (
                                                 <div className="px-3 pb-3 pt-0 border-t border-gray-50 flex flex-col gap-2">
                                                     <div className="flex items-center gap-2 mt-2 bg-gray-50 border border-gray-100 rounded-md px-2 py-1.5">
@@ -1116,7 +1167,41 @@ const Sidebar = ({ isOpen, onClose }: { isOpen: boolean; onClose: () => void }) 
     );
 };
 
-// --- 4. 主程式 ---
+// ✨ 4. 登入遮罩元件
+const LoginModal = () => {
+    const { currentProfile, setProfileAndLoad } = useStore();
+    const [loading, setLoading] = useState(false);
+
+    if (currentProfile) return null; // 已登入就不顯示
+
+    const handleLogin = async (role: 'admin' | 'visitor') => {
+        setLoading(true);
+        await setProfileAndLoad(role);
+        setLoading(false);
+    };
+
+    return (
+        <div className="fixed inset-0 z-[9999] bg-slate-900/80 backdrop-blur-sm flex items-center justify-center p-4">
+            <div className="bg-white rounded-2xl shadow-2xl p-8 max-w-sm w-full text-center space-y-6">
+                <div>
+                    <h1 className="text-3xl font-black text-slate-800 mb-2">東京冒險 🇯🇵</h1>
+                    <p className="text-slate-500 font-medium">請選擇您的身份</p>
+                </div>
+                <div className="space-y-3">
+                    <button onClick={() => handleLogin('admin')} disabled={loading} className="w-full py-4 rounded-xl bg-blue-600 text-white font-bold text-lg shadow-lg hover:bg-blue-700 hover:scale-[1.02] transition-all disabled:opacity-50 flex items-center justify-center gap-2">
+                        {loading ? <Loader2 className="animate-spin"/> : "Admin (管理者)"}
+                    </button>
+                    <button onClick={() => handleLogin('visitor')} disabled={loading} className="w-full py-4 rounded-xl bg-white border-2 border-slate-200 text-slate-700 font-bold text-lg hover:bg-slate-50 hover:border-slate-300 transition-all disabled:opacity-50">
+                        Visitor (訪客)
+                    </button>
+                </div>
+                <p className="text-xs text-slate-400">兩個身份的行程資料是分開儲存的</p>
+            </div>
+        </div>
+    );
+};
+
+// --- 5. 主程式 ---
 
 export default function VacationPlanner() {
     const { 
@@ -1125,9 +1210,20 @@ export default function VacationPlanner() {
         addSpot, removeSpot, reorderSpots, updateSpot, toggleSpotExpand, addCategory,
         updateTripInfo, updateFlight, reorderDays, updateDayInfo,
         setAccommodation, removeFromCollection,
-        viewMode, setViewMode
+        viewMode, setViewMode,
+        // ✨ 同步相關
+        currentProfile, saveToCloud, isSyncing
     } = useStore();
     
+    // ✨ 自動儲存邏輯 (Debounce)
+    useEffect(() => {
+        if (!currentProfile) return;
+        const timer = setTimeout(() => {
+            saveToCloud();
+        }, 2000); // 2秒後自動存檔
+        return () => clearTimeout(timer);
+    }, [trips, currentProfile, saveToCloud]);
+
     const activeTrip = trips.find(t => t.id === activeTripId) || trips[0];
     const { days, currentDayIndex, destination, startDate, name: tripName, outbound, inbound, accommodation } = activeTrip;
     
@@ -1240,6 +1336,16 @@ export default function VacationPlanner() {
         <Sidebar isOpen={isSidebarOpen} onClose={() => setSidebarOpen(false)} />
         {isSidebarOpen && <div className="fixed inset-0 bg-black/20 z-30" onClick={() => setSidebarOpen(false)} />}
         
+        {/* ✨ 1. 加入登入遮罩 */}
+        <LoginModal />
+
+        {/* ✨ 2. 同步狀態指示器 */}
+        {isSyncing && (
+            <div className="fixed top-4 right-4 z-[100] bg-white/90 backdrop-blur px-3 py-1.5 rounded-full text-xs font-bold text-blue-600 shadow border border-blue-100 flex items-center gap-2 animate-pulse pointer-events-none">
+                <Loader2 size={12} className="animate-spin"/> 同步中...
+            </div>
+        )}
+
         {isPickingAccommodation && (
             <div className="fixed top-4 left-1/2 -translate-x-1/2 z-[60] bg-white px-6 py-3 rounded-full shadow-xl border-2 border-indigo-500 flex items-center gap-3 animate-in slide-in-from-top-4">
                 <div className="w-2 h-2 rounded-full bg-indigo-500 animate-pulse"/>
@@ -1289,9 +1395,7 @@ export default function VacationPlanner() {
 
                   {currentSpots.map((spot, index) => (
                     <Marker 
-                        // 👇 修改這裡：把 key={spot.id} 改成下面這樣
                         key={`${spot.id}-${index}`} 
-                        
                         position={spot.location} 
                         icon={getMarkerIcon(getMarkerColor(spot.category))} 
                         label={{ text: (index + 1).toString(), color: "white", fontWeight: "bold" }} 
@@ -1304,7 +1408,6 @@ export default function VacationPlanner() {
                   {selectedLocation && !isPickingAccommodation && (
                       <InfoWindow 
                         position={{ lat: selectedLocation.lat, lng: selectedLocation.lng }} 
-                        // ✨ Fix 1: 關閉 InfoWindow 時，同時關閉收藏夾選單
                         onCloseClick={() => {
                             setSelectedLocation(null);
                             setMapCollectionSelectorOpen(false);
@@ -1313,7 +1416,6 @@ export default function VacationPlanner() {
                       >
                           <div className="relative">
                             {(() => {
-                                // ✨ Fix 3: 檢查此地點是否已在行程中
                                 const existingSpot = currentSpots.find(s => 
                                     (s.name === selectedLocation.name && 
                                      Math.abs(s.location.lat - selectedLocation.lat) < 0.0001 && 
@@ -1326,17 +1428,17 @@ export default function VacationPlanner() {
                                         title={selectedLocation.name} 
                                         address={selectedLocation.address} 
                                         rating={selectedLocation.rating} 
-                                        buttonText={isAdded ? "移除此景點" : "加入行程"} // ✨ 動態文字
-                                        buttonColorClass={isAdded ? "bg-red-50 text-red-600 border border-red-200 hover:bg-red-100" : "bg-blue-600 text-white hover:bg-blue-700"} // ✨ 動態顏色
-                                        actionIcon={isAdded ? <Trash2 size={16}/> : <Plus size={16} />} // ✨ 動態圖示
+                                        buttonText={isAdded ? "移除此景點" : "加入行程"} 
+                                        buttonColorClass={isAdded ? "bg-red-50 text-red-600 border border-red-200 hover:bg-red-100" : "bg-blue-600 text-white hover:bg-blue-700"} 
+                                        actionIcon={isAdded ? <Trash2 size={16}/> : <Plus size={16} />} 
                                         onClose={() => {
                                             setSelectedLocation(null);
                                             setMapCollectionSelectorOpen(false);
                                         }} 
                                         onAction={() => { 
                                             if (isAdded) {
-                                                removeSpot(existingSpot.id); // ✨ 移除邏輯
-                                                setSelectedLocation(null); // 關閉視窗
+                                                removeSpot(existingSpot.id); 
+                                                setSelectedLocation(null); 
                                             } else {
                                                 addSpot({ 
                                                     name: selectedLocation.name, 
@@ -1352,7 +1454,6 @@ export default function VacationPlanner() {
                                         }}
                                         onHeartClick={() => setMapCollectionSelectorOpen(!mapCollectionSelectorOpen)}
                                         isCollected={collections.some(c => c.spots.some(s => s.name === selectedLocation.name && Math.abs(s.location.lat - selectedLocation.lat) < 0.0001))}
-                                        // ✨ Fix 2: 這裡不傳入 onDelete，所以不會出現 Header 垃圾桶
                                     />
                                 );
                             })()}
@@ -1379,7 +1480,7 @@ export default function VacationPlanner() {
                         position={selectedSpotToRemove.location} 
                         onCloseClick={() => {
                             setSelectedSpotToRemove(null);
-                            setMapCollectionSelectorOpen(false); // ✨ Fix 1
+                            setMapCollectionSelectorOpen(false); 
                         }} 
                         options={{ headerDisabled: true }}
                       >
