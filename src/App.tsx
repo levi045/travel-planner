@@ -3,7 +3,7 @@ import { GoogleMap, Marker, Polyline, Autocomplete, useJsApiLoader, InfoWindow }
 import { DndContext, closestCenter, KeyboardSensor, PointerSensor, useSensor, useSensors, type DragEndEvent } from '@dnd-kit/core';
 import { arrayMove, SortableContext, sortableKeyboardCoordinates, verticalListSortingStrategy, horizontalListSortingStrategy, useSortable } from '@dnd-kit/sortable';
 import { CSS } from '@dnd-kit/utilities';
-import { GripVertical, Navigation, ExternalLink, MapPin, Calendar as CalendarIcon, Search, Plus, Trash2, Sun, CloudRain, CloudSun, Loader2, Layout, FolderOpen, FilePlus, X, Menu, CloudFog, CloudLightning, Snowflake, Plane, PlaneTakeoff, PlaneLanding, Wand2, ChevronDown, ChevronUp, Link as LinkIcon, Tag, Star, Edit3, Download, Upload } from 'lucide-react';
+import { GripVertical, Navigation, ExternalLink, MapPin, Calendar as CalendarIcon, Search, Plus, Trash2, Sun, CloudRain, CloudSun, Loader2, Layout, FolderOpen, FilePlus, X, Menu, CloudFog, CloudLightning, Snowflake, Plane, PlaneTakeoff, PlaneLanding, Wand2, ChevronDown, ChevronUp, Link as LinkIcon, Tag, Star, Edit3, Download, Upload, Map, List} from 'lucide-react';
 import { create } from 'zustand';
 import { persist } from 'zustand/middleware';
 
@@ -962,304 +962,352 @@ const Sidebar = ({ isOpen, onClose }: { isOpen: boolean; onClose: () => void }) 
 // --- 4. 主程式 ---
 
 export default function VacationPlanner() {
-  const { 
-      trips, activeTripId, savedCategories,
-      setCurrentDayIndex, addDay, deleteDay,
-      addSpot, removeSpot, reorderSpots, updateSpot, toggleSpotExpand, addCategory,
-      updateTripInfo, updateFlight, reorderDays, updateDayInfo
-  } = useStore();
+    const { 
+        trips, activeTripId, savedCategories,
+        setCurrentDayIndex, addDay, deleteDay,
+        addSpot, removeSpot, reorderSpots, updateSpot, toggleSpotExpand, addCategory,
+        updateTripInfo, updateFlight, reorderDays, updateDayInfo
+    } = useStore();
+    
+    const activeTrip = trips.find(t => t.id === activeTripId) || trips[0];
+    const { days, currentDayIndex, destination, startDate, name: tripName, outbound, inbound } = activeTrip;
   
-  const activeTrip = trips.find(t => t.id === activeTripId) || trips[0];
-  const { days, currentDayIndex, destination, startDate, name: tripName, outbound, inbound } = activeTrip;
-
-  const [isSidebarOpen, setSidebarOpen] = useState(false);
-  const mapRef = useRef<google.maps.Map | null>(null);
+    const [isSidebarOpen, setSidebarOpen] = useState(false);
+    const mapRef = useRef<google.maps.Map | null>(null);
+    
+    const [selectedLocation, setSelectedLocation] = useState<{ lat: number; lng: number; name: string; address: string; placeId?: string; rating?: number; website?: string } | null>(null);
+    const [selectedSpotToRemove, setSelectedSpotToRemove] = useState<Spot | null>(null);
   
-  const [selectedLocation, setSelectedLocation] = useState<{ lat: number; lng: number; name: string; address: string; placeId?: string; rating?: number; website?: string } | null>(null);
-  const [selectedSpotToRemove, setSelectedSpotToRemove] = useState<Spot | null>(null);
-
-  const [leftWidth, setLeftWidth] = useState(60); 
-  const [isResizing, setIsResizing] = useState(false);
-
-  const startResizing = useCallback(() => { setIsResizing(true); }, []);
-  const stopResizing = useCallback(() => { setIsResizing(false); }, []);
-  const resize = useCallback((e: MouseEvent) => {
-      if (isResizing) {
-          const newWidth = (e.clientX / window.innerWidth) * 100;
-          if (newWidth > 20 && newWidth < 80) { setLeftWidth(newWidth); }
-      }
-  }, [isResizing]);
-
-  useEffect(() => {
-      window.addEventListener('mousemove', resize);
-      window.addEventListener('mouseup', stopResizing);
-      return () => {
-          window.removeEventListener('mousemove', resize);
-          window.removeEventListener('mouseup', stopResizing);
-      };
-  }, [resize, stopResizing]);
-
-
-  const onLoadMap = React.useCallback((map: google.maps.Map) => { mapRef.current = map; }, []);
-  const onUnmountMap = React.useCallback(() => { mapRef.current = null; }, []);
-
-  const { isLoaded, loadError } = useJsApiLoader({ googleMapsApiKey: GOOGLE_MAPS_API_KEY, libraries: LIBRARIES, language: 'zh-TW' });
+    // ✨ UI 狀態與響應式邏輯
+    const [leftWidth, setLeftWidth] = useState(60); 
+    const [isResizing, setIsResizing] = useState(false);
+    const [isDesktop, setIsDesktop] = useState(window.innerWidth >= 768);
+    const [mobileTab, setMobileTab] = useState<'map' | 'list'>('list'); // 手機版目前的模式
   
-  const sensors = useSensors(
-      useSensor(PointerSensor, { activationConstraint: { distance: 5 } }), 
-      useSensor(KeyboardSensor, { coordinateGetter: sortableKeyboardCoordinates })
-  );
-
-  const handleDragEnd = (event: DragEndEvent) => {
-    const { active, over } = event;
-    if (active.id !== over?.id) reorderSpots(active.id as string, over?.id as string);
-  };
-
-  const handleDestinationSelect = (lat: number, lng: number) => {
-      if (mapRef.current) {
-          mapRef.current.panTo({ lat, lng });
-          mapRef.current.setZoom(12); // Zoom to city level
-      }
-  };
-
-  const currentDayData = days[currentDayIndex] || { spots: [] };
-  const currentSpots = currentDayData.spots;
+    // 監聽視窗大小，判斷是手機還是電腦
+    useEffect(() => {
+      const handleResize = () => setIsDesktop(window.innerWidth >= 768);
+      window.addEventListener('resize', handleResize);
+      return () => window.removeEventListener('resize', handleResize);
+    }, []);
   
-  const weatherLocation = useMemo(() => {
-      if (currentDayData.customLat && currentDayData.customLng) {
-          return { lat: currentDayData.customLat, lng: currentDayData.customLng };
-      }
-      
-      if (currentSpots.length === 0) return { lat: 35.6762, lng: 139.6503 }; 
-      const lats = currentSpots.map(s => s.location.lat).sort((a,b) => a-b);
-      const lngs = currentSpots.map(s => s.location.lng).sort((a,b) => a-b);
-      const mid = Math.floor(lats.length / 2);
-      return { lat: lats[mid], lng: lngs[mid] };
-  }, [currentSpots, currentDayData]);
-
-  const mapCenter = useMemo(() => {
-      return currentSpots.length > 0 ? currentSpots[0].location : { lat: 35.6762, lng: 139.6503 };
-  }, [currentSpots]);
-
-  const { weather, loading: weatherLoading, autoLocationName } = useWeather(weatherLocation.lat, weatherLocation.lng, startDate, currentDayIndex);
-
-  const displayedLocationName = currentDayData.customLocation || autoLocationName;
-
-  const onMapClick = React.useCallback((e: google.maps.MapMouseEvent) => {
-    const event = e as any; 
-    if (!e.latLng) return;
-    setSelectedSpotToRemove(null);
-    setSelectedLocation(null);
-    const lat = e.latLng.lat();
-    const lng = e.latLng.lng();
-    if (event.placeId) {
-        e.stop(); 
-        if (!mapRef.current) return;
-        const service = new google.maps.places.PlacesService(mapRef.current);
-        service.getDetails({ placeId: event.placeId, fields: ['name', 'formatted_address', 'geometry', 'rating', 'website'] }, (place, status) => {
-            if (status === google.maps.places.PlacesServiceStatus.OK && place && place.geometry && place.geometry.location) {
-                setSelectedLocation({ lat: place.geometry.location.lat(), lng: place.geometry.location.lng(), name: place.name || "未知名稱", address: place.formatted_address || "", placeId: event.placeId, rating: place.rating, website: place.website });
-            }
-        });
-    } else {
-        const geocoder = new google.maps.Geocoder();
-        geocoder.geocode({ location: { lat, lng } }, (results, status) => {
-            let spotName = `自選地點`;
-            let address = `${lat.toFixed(4)}, ${lng.toFixed(4)}`;
-            if (status === "OK" && results && results[0]) {
-                address = results[0].formatted_address;
-                const parts = address.split(' ');
-                if (parts.length > 0) spotName = parts[parts.length - 1]; 
-            }
-            setSelectedLocation({ lat, lng, name: spotName, address: address });
-        });
-    }
-  }, []);
-
-  const handlePlacePreview = (place: google.maps.places.PlaceResult) => {
-     if (place.geometry && place.geometry.location && place.name) {
-         const lat = place.geometry.location.lat();
-         const lng = place.geometry.location.lng();
-         if(mapRef.current) { mapRef.current.panTo({ lat, lng }); mapRef.current.setZoom(15); }
-         setSelectedLocation({ lat, lng, name: place.name, address: place.formatted_address || "", placeId: place.place_id, rating: place.rating, website: place.website });
-         setSelectedSpotToRemove(null);
-     }
-  };
+    const startResizing = useCallback(() => { setIsResizing(true); }, []);
+    const stopResizing = useCallback(() => { setIsResizing(false); }, []);
+    const resize = useCallback((e: MouseEvent) => {
+        if (isResizing) {
+            const newWidth = (e.clientX / window.innerWidth) * 100;
+            if (newWidth > 20 && newWidth < 80) { setLeftWidth(newWidth); }
+        }
+    }, [isResizing]);
   
-  const handleDayDragEnd = (event: DragEndEvent) => {
+    useEffect(() => {
+        window.addEventListener('mousemove', resize);
+        window.addEventListener('mouseup', stopResizing);
+        return () => {
+            window.removeEventListener('mousemove', resize);
+            window.removeEventListener('mouseup', stopResizing);
+        };
+    }, [resize, stopResizing]);
+  
+  
+    const onLoadMap = React.useCallback((map: google.maps.Map) => { mapRef.current = map; }, []);
+    const onUnmountMap = React.useCallback(() => { mapRef.current = null; }, []);
+  
+    const { isLoaded, loadError } = useJsApiLoader({ googleMapsApiKey: GOOGLE_MAPS_API_KEY, libraries: LIBRARIES, language: 'zh-TW' });
+    
+    const sensors = useSensors(
+        useSensor(PointerSensor, { activationConstraint: { distance: 5 } }), 
+        useSensor(KeyboardSensor, { coordinateGetter: sortableKeyboardCoordinates })
+    );
+  
+    const handleDragEnd = (event: DragEndEvent) => {
       const { active, over } = event;
-      if (active.id !== over?.id) {
-          const oldIndex = days.findIndex(d => d.id === active.id);
-          const newIndex = days.findIndex(d => d.id === over?.id);
-          reorderDays(oldIndex, newIndex);
+      if (active.id !== over?.id) reorderSpots(active.id as string, over?.id as string);
+    };
+  
+    const handleDestinationSelect = (lat: number, lng: number) => {
+        if (mapRef.current) {
+            mapRef.current.panTo({ lat, lng });
+            mapRef.current.setZoom(12);
+        }
+    };
+  
+    const currentDayData = days[currentDayIndex] || { spots: [] };
+    const currentSpots = currentDayData.spots;
+    
+    const weatherLocation = useMemo(() => {
+        if (currentDayData.customLat && currentDayData.customLng) {
+            return { lat: currentDayData.customLat, lng: currentDayData.customLng };
+        }
+        if (currentSpots.length === 0) return { lat: 35.6762, lng: 139.6503 }; 
+        const lats = currentSpots.map(s => s.location.lat).sort((a,b) => a-b);
+        const lngs = currentSpots.map(s => s.location.lng).sort((a,b) => a-b);
+        const mid = Math.floor(lats.length / 2);
+        return { lat: lats[mid], lng: lngs[mid] };
+    }, [currentSpots, currentDayData]);
+  
+    const mapCenter = useMemo(() => {
+        return currentSpots.length > 0 ? currentSpots[0].location : { lat: 35.6762, lng: 139.6503 };
+    }, [currentSpots]);
+  
+    const { weather, loading: weatherLoading, autoLocationName } = useWeather(weatherLocation.lat, weatherLocation.lng, startDate, currentDayIndex);
+    const displayedLocationName = currentDayData.customLocation || autoLocationName;
+  
+    const onMapClick = React.useCallback((e: google.maps.MapMouseEvent) => {
+      const event = e as any; 
+      if (!e.latLng) return;
+      setSelectedSpotToRemove(null);
+      setSelectedLocation(null);
+      const lat = e.latLng.lat();
+      const lng = e.latLng.lng();
+      if (event.placeId) {
+          e.stop(); 
+          if (!mapRef.current) return;
+          const service = new google.maps.places.PlacesService(mapRef.current);
+          service.getDetails({ placeId: event.placeId, fields: ['name', 'formatted_address', 'geometry', 'rating', 'website'] }, (place, status) => {
+              if (status === google.maps.places.PlacesServiceStatus.OK && place && place.geometry && place.geometry.location) {
+                  setSelectedLocation({ lat: place.geometry.location.lat(), lng: place.geometry.location.lng(), name: place.name || "未知名稱", address: place.formatted_address || "", placeId: event.placeId, rating: place.rating, website: place.website });
+              }
+          });
+      } else {
+          const geocoder = new google.maps.Geocoder();
+          geocoder.geocode({ location: { lat, lng } }, (results, status) => {
+              let spotName = `自選地點`;
+              let address = `${lat.toFixed(4)}, ${lng.toFixed(4)}`;
+              if (status === "OK" && results && results[0]) {
+                  address = results[0].formatted_address;
+                  const parts = address.split(' ');
+                  if (parts.length > 0) spotName = parts[parts.length - 1]; 
+              }
+              setSelectedLocation({ lat, lng, name: spotName, address: address });
+          });
       }
-  };
-
-  const polylinePath = currentSpots.map(s => s.location);
-  const currentDateDisplay = formatDate(startDate, currentDayIndex);
-  const isFirstDay = currentDayIndex === 0;
-  const isLastDay = currentDayIndex === days.length - 1;
-
-  if (loadError) return <div className="p-10 text-red-500 font-bold">載入地圖失敗，請檢查 API Key 額度與權限設定。</div>;
-
-  return (
-    <div className="flex h-screen w-full bg-gray-50 overflow-hidden flex-col md:flex-row font-sans relative select-none">
-      <Sidebar isOpen={isSidebarOpen} onClose={() => setSidebarOpen(false)} />
-      {isSidebarOpen && <div className="fixed inset-0 bg-black/20 z-30" onClick={() => setSidebarOpen(false)} />}
-      
-      {/* ✨ 左側地圖區塊 */}
-      <div style={{ width: `${leftWidth}%`, pointerEvents: isResizing ? 'none' : 'auto' }} className="h-[50vh] md:h-full relative order-2 md:order-1 bg-gray-200">
-        {!isLoaded ? (<div className="flex h-full w-full items-center justify-center text-gray-500 gap-2"><Loader2 className="animate-spin" /> 地圖載入中...</div>) : (
-          <>
-            <HeaderControls onMenuClick={() => setSidebarOpen(true)} onPlacePreview={handlePlacePreview} />
-            <GoogleMap 
-                mapContainerStyle={{ width: '100%', height: '100%' }} center={mapCenter} zoom={13} 
-                options={{ disableDefaultUI: true, zoomControl: true, gestureHandling: 'greedy' }} 
-                onClick={onMapClick} onDragStart={() => setSelectedLocation(null)} onLoad={onLoadMap} onUnmount={onUnmountMap}
-            >
-                {currentSpots.map((spot, index) => (
-                   <Marker key={spot.id} position={spot.location} label={{ text: (index + 1).toString(), color: "white", fontWeight: "bold" }} onClick={() => { setSelectedLocation(null); setSelectedSpotToRemove(spot); }} />
-                ))}
-                <Polyline path={polylinePath} options={{ strokeColor: "#3B82F6", strokeOpacity: 0.8, strokeWeight: 4 }} />
-                
-                {selectedLocation && (
-                    <InfoWindow position={{ lat: selectedLocation.lat, lng: selectedLocation.lng }} onCloseClick={() => setSelectedLocation(null)} options={{ headerDisabled: true }}>
-                        <CustomInfoWindow 
-                            title={selectedLocation.name} address={selectedLocation.address} rating={selectedLocation.rating}
-                            buttonText="加入行程" buttonColorClass="bg-blue-600 text-white hover:bg-blue-700" actionIcon={<Plus size={16} />}
-                            onClose={() => setSelectedLocation(null)}
-                            onAction={() => { 
-                                addSpot({ name: selectedLocation.name, location: { lat: selectedLocation.lat, lng: selectedLocation.lng }, address: selectedLocation.address, website: selectedLocation.website, rating: selectedLocation.rating }); 
-                                setSelectedLocation(null); 
-                            }}
-                        />
-                    </InfoWindow>
+    }, []);
+  
+    const handlePlacePreview = (place: google.maps.places.PlaceResult) => {
+       if (place.geometry && place.geometry.location && place.name) {
+           const lat = place.geometry.location.lat();
+           const lng = place.geometry.location.lng();
+           if(mapRef.current) { mapRef.current.panTo({ lat, lng }); mapRef.current.setZoom(15); }
+           setSelectedLocation({ lat, lng, name: place.name, address: place.formatted_address || "", placeId: place.place_id, rating: place.rating, website: place.website });
+           setSelectedSpotToRemove(null);
+           
+           // 手機版搜尋後自動切到地圖模式
+           if (!isDesktop) setMobileTab('map');
+       }
+    };
+    
+    const handleDayDragEnd = (event: DragEndEvent) => {
+        const { active, over } = event;
+        if (active.id !== over?.id) {
+            const oldIndex = days.findIndex(d => d.id === active.id);
+            const newIndex = days.findIndex(d => d.id === over?.id);
+            reorderDays(oldIndex, newIndex);
+        }
+    };
+  
+    const polylinePath = currentSpots.map(s => s.location);
+    const currentDateDisplay = formatDate(startDate, currentDayIndex);
+    const isFirstDay = currentDayIndex === 0;
+    const isLastDay = currentDayIndex === days.length - 1;
+  
+    if (loadError) return <div className="p-10 text-red-500 font-bold">載入地圖失敗，請檢查 API Key 額度與權限設定。</div>;
+  
+    return (
+      // 使用 h-[100dvh] 解決手機瀏覽器網址列遮擋問題
+      <div className="flex h-[100dvh] w-full bg-gray-50 overflow-hidden flex-col md:flex-row font-sans relative select-none">
+        <Sidebar isOpen={isSidebarOpen} onClose={() => setSidebarOpen(false)} />
+        {isSidebarOpen && <div className="fixed inset-0 bg-black/20 z-30" onClick={() => setSidebarOpen(false)} />}
+        
+        {/* ✨ 左側地圖區塊 */}
+        {/* 在手機版：如果目前模式是 map 才顯示，且寬度 100% */}
+        {/* 在電腦版：永遠顯示，寬度依照 leftWidth */}
+        <div 
+          style={{ width: isDesktop ? `${leftWidth}%` : '100%' }} 
+          className={`${!isDesktop && mobileTab !== 'map' ? 'hidden' : 'flex'} h-full md:h-full relative order-2 md:order-1 bg-gray-200 flex-col`}
+        >
+          {!isLoaded ? (<div className="flex h-full w-full items-center justify-center text-gray-500 gap-2"><Loader2 className="animate-spin" /> 地圖載入中...</div>) : (
+            <>
+              <HeaderControls onMenuClick={() => setSidebarOpen(true)} onPlacePreview={handlePlacePreview} />
+              <GoogleMap 
+                  mapContainerStyle={{ width: '100%', height: '100%' }} center={mapCenter} zoom={13} 
+                  options={{ disableDefaultUI: true, zoomControl: true, gestureHandling: 'greedy' }} 
+                  onClick={onMapClick} onDragStart={() => setSelectedLocation(null)} onLoad={onLoadMap} onUnmount={onUnmountMap}
+              >
+                  {currentSpots.map((spot, index) => (
+                     <Marker key={spot.id} position={spot.location} label={{ text: (index + 1).toString(), color: "white", fontWeight: "bold" }} onClick={() => { setSelectedLocation(null); setSelectedSpotToRemove(spot); }} />
+                  ))}
+                  <Polyline path={polylinePath} options={{ strokeColor: "#3B82F6", strokeOpacity: 0.8, strokeWeight: 4 }} />
+                  
+                  {selectedLocation && (
+                      <InfoWindow position={{ lat: selectedLocation.lat, lng: selectedLocation.lng }} onCloseClick={() => setSelectedLocation(null)} options={{ headerDisabled: true }}>
+                          <CustomInfoWindow 
+                              title={selectedLocation.name} address={selectedLocation.address} rating={selectedLocation.rating}
+                              buttonText="加入行程" buttonColorClass="bg-blue-600 text-white hover:bg-blue-700" actionIcon={<Plus size={16} />}
+                              onClose={() => setSelectedLocation(null)}
+                              onAction={() => { 
+                                  addSpot({ name: selectedLocation.name, location: { lat: selectedLocation.lat, lng: selectedLocation.lng }, address: selectedLocation.address, website: selectedLocation.website, rating: selectedLocation.rating }); 
+                                  setSelectedLocation(null); 
+                                  if (!isDesktop) {
+                                      alert("已加入！切換到列表即可查看");
+                                      setMobileTab('list');
+                                  }
+                              }}
+                          />
+                      </InfoWindow>
+                  )}
+  
+                  {selectedSpotToRemove && (
+                      <InfoWindow position={selectedSpotToRemove.location} onCloseClick={() => setSelectedSpotToRemove(null)} options={{ headerDisabled: true }}>
+                          <CustomInfoWindow 
+                              title={selectedSpotToRemove.name} address={selectedSpotToRemove.address || "已在行程中"} rating={selectedSpotToRemove.rating} category={selectedSpotToRemove.category}
+                              buttonText="移除此景點" buttonColorClass="bg-red-50 text-red-600 border border-red-200 hover:bg-red-100" actionIcon={<Trash2 size={16} />}
+                              onClose={() => setSelectedSpotToRemove(null)}
+                              onAction={() => { removeSpot(selectedSpotToRemove.id); setSelectedSpotToRemove(null); }}
+                          />
+                      </InfoWindow>
+                  )}
+              </GoogleMap>
+            </>
+          )}
+        </div>
+  
+        {/* 電腦版才有的分隔線 */}
+        <div className="hidden md:flex w-2 bg-gray-100 hover:bg-blue-400 cursor-col-resize items-center justify-center z-50 transition-colors order-1 md:order-1 relative group" onMouseDown={startResizing} onDoubleClick={() => setLeftWidth(60)} title="點兩下重置比例">
+            <div className="h-8 w-[2px] bg-gray-300 rounded-full group-hover:bg-white transition-colors" />
+        </div>
+  
+        {/* ✨ 右側行程列表區塊 */}
+        {/* 在手機版：如果目前模式是 list 才顯示，且寬度 100% */}
+        <div 
+          style={{ width: isDesktop ? `${100 - leftWidth}%` : '100%' }} 
+          className={`${!isDesktop && mobileTab !== 'list' ? 'hidden' : 'flex'} h-full flex-col bg-white order-1 md:order-2 z-20 shadow-xl overflow-hidden`}
+        >
+          <div className="px-6 py-4 bg-white border-b border-gray-100 flex flex-col gap-3">
+              <div className="flex items-center gap-2">
+                  {/* 手機版補上 Menu 按鈕，因為 HeaderControls 只在地圖顯示 */}
+                  <button onClick={() => setSidebarOpen(true)} className="md:hidden p-2 -ml-2 text-gray-500"><Menu size={20} /></button>
+                  <Layout size={18} className="text-blue-500 hidden md:block" />
+                  <input value={tripName} onChange={(e) => updateTripInfo({ name: e.target.value })} className="text-xl font-extrabold text-gray-800 w-full outline-none placeholder-gray-300 border-b border-transparent focus:border-blue-300 transition-colors" placeholder="輸入行程名稱..." />
+              </div>
+              {/* 其他 Input 保持原樣 */}
+              <div className="grid grid-cols-2 gap-4">
+                  <div className="flex items-center gap-2 bg-gray-50 px-3 py-2 rounded-lg">
+                      <MapPin size={16} className="text-gray-400 shrink-0" />
+                      {isLoaded && (
+                          <DestinationInput 
+                              value={destination} 
+                              onChange={(val) => updateTripInfo({ destination: val })} 
+                              onLocationSelect={handleDestinationSelect}
+                          />
+                      )}
+                  </div>
+                  <div className="flex items-center gap-2 bg-gray-50 px-3 py-2 rounded-lg"><CalendarIcon size={16} className="text-gray-400 shrink-0" /><input type="date" value={startDate} onChange={(e) => updateTripInfo({ startDate: e.target.value })} className="text-sm text-gray-700 outline-none font-medium bg-transparent w-full" /></div>
+              </div>
+          </div>
+  
+          {/* Draggable Day Tabs */}
+          <div className="flex items-center gap-2 px-4 py-2 bg-gray-50 border-b border-gray-200 overflow-x-auto no-scrollbar">
+              <DndContext sensors={sensors} collisionDetection={closestCenter} onDragEnd={handleDayDragEnd}>
+                  <SortableContext items={days.map(d => d.id)} strategy={horizontalListSortingStrategy}>
+                      {days.map((day, index) => (
+                          <SortableDayTab 
+                              key={day.id} 
+                              day={day} 
+                              index={index} 
+                              isActive={currentDayIndex === index} 
+                              onClick={() => setCurrentDayIndex(index)}
+                              onDelete={() => deleteDay(index)}
+                              showDelete={days.length > 1}
+                          />
+                      ))}
+                  </SortableContext>
+              </DndContext>
+              <button onClick={addDay} className="p-1.5 rounded-full bg-white border border-dashed border-gray-300 hover:border-blue-500 hover:text-blue-500 transition-colors"><Plus size={16} /></button>
+          </div>
+  
+          <div className="px-6 py-3 border-b border-gray-100 bg-white flex justify-between items-center">
+               <div>
+                  <div className="flex items-center gap-2">
+                      <h2 className="text-xl font-bold text-gray-800">第 {currentDayIndex + 1} 天行程</h2>
+                      <div className="flex items-center text-xs text-gray-400 bg-gray-100 px-2 py-0.5 rounded-full hover:bg-gray-200 transition-colors group/edit cursor-text">
+                          <MapPin size={10} className="mr-1"/>
+                          {isLoaded && (
+                              <DayLocationInput 
+                                  value={displayedLocationName}
+                                  placeholder="區域 (自動偵測)"
+                                  onChange={(val) => updateDayInfo(currentDayIndex, { customLocation: val })}
+                                  onLocationSelect={(lat, lng, name) => {
+                                      updateDayInfo(currentDayIndex, { 
+                                          customLocation: name, 
+                                          customLat: lat,
+                                          customLng: lng
+                                      });
+                                  }}
+                              />
+                          )}
+                          <Edit3 size={10} className="ml-1 opacity-0 group-hover/edit:opacity-100 transition-opacity" />
+                      </div>
+                  </div>
+                  <div className="text-sm text-gray-500">{currentDateDisplay}</div>
+               </div>
+               <div className="flex flex-col items-end">
+                  {weatherLoading ? (<div className="text-xs text-gray-400 flex items-center gap-1"><Loader2 className="animate-spin" size={12}/>更新氣象中</div>) : weather ? (
+                      <div className="flex flex-col items-end">
+                          <div className="flex items-center gap-1 bg-blue-50 px-3 py-1 rounded-full border border-blue-100">{weather.icon}<span className="text-sm font-semibold text-gray-700">{weather.text}</span></div>
+                      </div>
+                  ) : null}
+               </div>
+          </div>
+  
+          {/* 列表內容區域 - 增加 pb-24 防止手機版內容被底部按鈕擋住 */}
+          <div className="flex-1 overflow-y-auto p-4 bg-gray-50 pb-24 md:pb-4">
+            {isFirstDay && <FlightCard type="outbound" flight={outbound} onUpdate={(info) => updateFlight('outbound', info)} />}
+            
+            <DndContext sensors={sensors} collisionDetection={closestCenter} onDragEnd={handleDragEnd}>
+              <SortableContext items={currentSpots} strategy={verticalListSortingStrategy}>
+                {currentSpots.length === 0 ? (
+                    <div className="flex flex-col items-center justify-center h-40 text-gray-400 text-sm"><Search size={32} className="mb-2 opacity-50"/><p>在地圖上搜尋或點選來新增景點</p></div>
+                ) : (
+                  currentSpots.map((spot, index) => (
+                      <React.Fragment key={spot.id}>
+                          <SpotCard 
+                              spot={spot} index={index} isLast={index === currentSpots.length - 1} 
+                              updateSpot={updateSpot} toggleSpotExpand={toggleSpotExpand} removeSpot={removeSpot} 
+                              savedCategories={savedCategories} addCategory={addCategory}
+                          />
+                          {index < currentSpots.length - 1 && (
+                              <div className="flex justify-center py-2 relative z-10">
+                                  <a href={getGoogleMapsLink(spot, currentSpots[index + 1])} target="_blank" rel="noreferrer" className="flex items-center gap-2 px-3 py-1 bg-green-50 text-green-700 text-xs font-medium rounded-full border border-green-200 shadow-sm hover:bg-green-100 transition-colors"><Navigation size={12} /><span>交通方式</span><ExternalLink size={10} /></a>
+                              </div>
+                          )}
+                      </React.Fragment>
+                  ))
                 )}
-
-                {selectedSpotToRemove && (
-                    <InfoWindow position={selectedSpotToRemove.location} onCloseClick={() => setSelectedSpotToRemove(null)} options={{ headerDisabled: true }}>
-                        <CustomInfoWindow 
-                            title={selectedSpotToRemove.name} address={selectedSpotToRemove.address || "已在行程中"} rating={selectedSpotToRemove.rating} category={selectedSpotToRemove.category}
-                            buttonText="移除此景點" buttonColorClass="bg-red-50 text-red-600 border border-red-200 hover:bg-red-100" actionIcon={<Trash2 size={16} />}
-                            onClose={() => setSelectedSpotToRemove(null)}
-                            onAction={() => { removeSpot(selectedSpotToRemove.id); setSelectedSpotToRemove(null); }}
-                        />
-                    </InfoWindow>
-                )}
-            </GoogleMap>
-          </>
+              </SortableContext>
+            </DndContext>
+  
+            {isLastDay && <FlightCard type="inbound" flight={inbound} onUpdate={(info) => updateFlight('inbound', info)} />}
+          </div>
+        </div>
+  
+        {/* ✨ 手機版專屬：底部浮動切換按鈕 */}
+        {!isDesktop && (
+          <div className="fixed bottom-6 left-1/2 transform -translate-x-1/2 z-50 flex bg-white/90 backdrop-blur shadow-lg rounded-full p-1.5 border border-gray-200">
+              <button 
+                  onClick={() => setMobileTab('map')}
+                  className={`flex items-center gap-2 px-4 py-2 rounded-full font-bold transition-all ${mobileTab === 'map' ? 'bg-blue-600 text-white shadow-md' : 'text-gray-500 hover:bg-gray-100'}`}
+              >
+                  <Map size={18} /> 地圖
+              </button>
+              <button 
+                  onClick={() => setMobileTab('list')}
+                  className={`flex items-center gap-2 px-4 py-2 rounded-full font-bold transition-all ${mobileTab === 'list' ? 'bg-blue-600 text-white shadow-md' : 'text-gray-500 hover:bg-gray-100'}`}
+              >
+                  <List size={18} /> 行程 ({currentSpots.length})
+              </button>
+          </div>
         )}
       </div>
-
-      <div className="hidden md:flex w-2 bg-gray-100 hover:bg-blue-400 cursor-col-resize items-center justify-center z-50 transition-colors order-1 md:order-1 relative group" onMouseDown={startResizing} onDoubleClick={() => setLeftWidth(60)} title="點兩下重置比例">
-          <div className="h-8 w-[2px] bg-gray-300 rounded-full group-hover:bg-white transition-colors" />
-      </div>
-
-      {/* Right Panel */}
-      <div style={{ width: `${100 - leftWidth}%`, pointerEvents: isResizing ? 'none' : 'auto' }} className="h-[50vh] md:h-full flex flex-col bg-white order-1 md:order-2 z-20 shadow-xl overflow-hidden">
-        <div className="px-6 py-4 bg-white border-b border-gray-100 flex flex-col gap-3">
-            <div className="flex items-center gap-2">
-                <Layout size={18} className="text-blue-500" />
-                <input value={tripName} onChange={(e) => updateTripInfo({ name: e.target.value })} className="text-xl font-extrabold text-gray-800 w-full outline-none placeholder-gray-300 border-b border-transparent focus:border-blue-300 transition-colors" placeholder="輸入行程名稱..." />
-            </div>
-            <div className="grid grid-cols-2 gap-4">
-                <div className="flex items-center gap-2 bg-gray-50 px-3 py-2 rounded-lg">
-                    <MapPin size={16} className="text-gray-400 shrink-0" />
-                    {isLoaded && (
-                        <DestinationInput 
-                            value={destination} 
-                            onChange={(val) => updateTripInfo({ destination: val })} 
-                            onLocationSelect={handleDestinationSelect}
-                        />
-                    )}
-                </div>
-                <div className="flex items-center gap-2 bg-gray-50 px-3 py-2 rounded-lg"><CalendarIcon size={16} className="text-gray-400 shrink-0" /><input type="date" value={startDate} onChange={(e) => updateTripInfo({ startDate: e.target.value })} className="text-sm text-gray-700 outline-none font-medium bg-transparent w-full" /></div>
-            </div>
-        </div>
-
-        {/* ✨ Draggable Day Tabs with Fixed Sensors */}
-        <div className="flex items-center gap-2 px-4 py-2 bg-gray-50 border-b border-gray-200 overflow-x-auto no-scrollbar">
-            <DndContext sensors={sensors} collisionDetection={closestCenter} onDragEnd={handleDayDragEnd}>
-                <SortableContext items={days.map(d => d.id)} strategy={horizontalListSortingStrategy}>
-                    {days.map((day, index) => (
-                        <SortableDayTab 
-                            key={day.id} 
-                            day={day} 
-                            index={index} 
-                            isActive={currentDayIndex === index} 
-                            onClick={() => setCurrentDayIndex(index)}
-                            onDelete={() => deleteDay(index)}
-                            showDelete={days.length > 1}
-                        />
-                    ))}
-                </SortableContext>
-            </DndContext>
-            <button onClick={addDay} className="p-1.5 rounded-full bg-white border border-dashed border-gray-300 hover:border-blue-500 hover:text-blue-500 transition-colors"><Plus size={16} /></button>
-        </div>
-
-        <div className="px-6 py-3 border-b border-gray-100 bg-white flex justify-between items-center">
-             <div>
-                <div className="flex items-center gap-2">
-                    <h2 className="text-xl font-bold text-gray-800">第 {currentDayIndex + 1} 天行程</h2>
-                    <div className="flex items-center text-xs text-gray-400 bg-gray-100 px-2 py-0.5 rounded-full hover:bg-gray-200 transition-colors group/edit cursor-text">
-                        <MapPin size={10} className="mr-1"/>
-                        {isLoaded && (
-                            <DayLocationInput 
-                                value={displayedLocationName}
-                                placeholder="區域 (自動偵測)"
-                                onChange={(val) => updateDayInfo(currentDayIndex, { customLocation: val })}
-                                onLocationSelect={(lat, lng, name) => {
-                                    updateDayInfo(currentDayIndex, { 
-                                        customLocation: name, 
-                                        customLat: lat,
-                                        customLng: lng
-                                    });
-                                }}
-                            />
-                        )}
-                        <Edit3 size={10} className="ml-1 opacity-0 group-hover/edit:opacity-100 transition-opacity" />
-                    </div>
-                </div>
-                <div className="text-sm text-gray-500">{currentDateDisplay}</div>
-             </div>
-             <div className="flex flex-col items-end">
-                {weatherLoading ? (<div className="text-xs text-gray-400 flex items-center gap-1"><Loader2 className="animate-spin" size={12}/>更新氣象中</div>) : weather ? (
-                    <div className="flex flex-col items-end">
-                        <div className="flex items-center gap-1 bg-blue-50 px-3 py-1 rounded-full border border-blue-100">{weather.icon}<span className="text-sm font-semibold text-gray-700">{weather.text}</span></div>
-                    </div>
-                ) : null}
-             </div>
-        </div>
-
-        <div className="flex-1 overflow-y-auto p-4 bg-gray-50">
-          {isFirstDay && <FlightCard type="outbound" flight={outbound} onUpdate={(info) => updateFlight('outbound', info)} />}
-          
-          <DndContext sensors={sensors} collisionDetection={closestCenter} onDragEnd={handleDragEnd}>
-            <SortableContext items={currentSpots} strategy={verticalListSortingStrategy}>
-              {currentSpots.length === 0 ? (
-                  <div className="flex flex-col items-center justify-center h-40 text-gray-400 text-sm"><Search size={32} className="mb-2 opacity-50"/><p>在地圖上搜尋或點選來新增景點</p></div>
-              ) : (
-                currentSpots.map((spot, index) => (
-                    <React.Fragment key={spot.id}>
-                        <SpotCard 
-                            spot={spot} index={index} isLast={index === currentSpots.length - 1} 
-                            updateSpot={updateSpot} toggleSpotExpand={toggleSpotExpand} removeSpot={removeSpot} 
-                            savedCategories={savedCategories} addCategory={addCategory}
-                        />
-                        {index < currentSpots.length - 1 && (
-                            <div className="flex justify-center py-2 relative z-10">
-                                <a href={getGoogleMapsLink(spot, currentSpots[index + 1])} target="_blank" rel="noreferrer" className="flex items-center gap-2 px-3 py-1 bg-green-50 text-green-700 text-xs font-medium rounded-full border border-green-200 shadow-sm hover:bg-green-100 transition-colors"><Navigation size={12} /><span>交通方式</span><ExternalLink size={10} /></a>
-                            </div>
-                        )}
-                    </React.Fragment>
-                ))
-              )}
-            </SortableContext>
-          </DndContext>
-
-          {isLastDay && <FlightCard type="inbound" flight={inbound} onUpdate={(info) => updateFlight('inbound', info)} />}
-        </div>
-      </div>
-    </div>
-  );
-}
+    );
+  }
