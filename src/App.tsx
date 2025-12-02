@@ -3,15 +3,19 @@ import { GoogleMap, Marker, Polyline, Autocomplete, useJsApiLoader, InfoWindow }
 import { DndContext, closestCenter, KeyboardSensor, PointerSensor, useSensor, useSensors, type DragEndEvent } from '@dnd-kit/core';
 import { arrayMove, SortableContext, sortableKeyboardCoordinates, verticalListSortingStrategy, horizontalListSortingStrategy, useSortable } from '@dnd-kit/sortable';
 import { CSS } from '@dnd-kit/utilities';
-import { GripVertical, Navigation, ExternalLink, MapPin, Calendar as CalendarIcon, Search, Plus, Trash2, Sun, CloudRain, CloudSun, Loader2, Layout, FolderOpen, FilePlus, X, Menu, CloudFog, CloudLightning, Snowflake, Plane, PlaneTakeoff, PlaneLanding, Wand2, ChevronDown, ChevronUp, Link as LinkIcon, Tag, Star, Edit3, Map as MapIcon, List, CheckSquare, Check, ArrowLeft, Hotel, Copy, Bookmark, RefreshCcw, FolderHeart, Heart, Eye, EyeOff, Flag, Utensils, Coffee, ShoppingBag } from 'lucide-react';
+import { GripVertical, Navigation, ExternalLink, MapPin, Calendar as CalendarIcon, Search, Plus, Trash2, Sun, CloudRain, CloudSun, Loader2, Layout, FolderOpen, FilePlus, X, Menu, CloudFog, CloudLightning, Snowflake, Plane, PlaneTakeoff, PlaneLanding, Wand2, ChevronDown, ChevronUp, Link as LinkIcon, Tag, Star, Edit3, Map as MapIcon, List, CheckSquare, Check, ArrowLeft, Hotel, Copy, RefreshCcw, FolderHeart, Heart, Eye, EyeOff, Flag, Utensils, Coffee, ShoppingBag } from 'lucide-react';
 import { create } from 'zustand';
 // 注意：我們移除了 'zustand/middleware' 的 persist，因為要改用雲端同步
 
 // --- 0. 設定與常數 ---
 const LIBRARIES: ("places")[] = ["places"];
 const GOOGLE_MAPS_API_KEY = import.meta.env.VITE_GOOGLE_MAPS_API_KEY || "";
+const LOCATION_TOLERANCE = 0.0001;
+const AUTO_SAVE_DELAY = 2000;
+const DEFAULT_MAP_CENTER = { lat: 35.6762, lng: 139.6503 };
+const DEFAULT_ZOOM = 13;
 
-const generateId = () => Math.random().toString(36).substr(2, 9);
+const generateId = () => Math.random().toString(36).substring(2, 11);
 
 const DEFAULT_CATEGORIES = [
     '觀光景點', '美食餐廳', '購物行程', '咖啡廳', 
@@ -214,21 +218,49 @@ const useStore = create<ItineraryStore>((set, get) => ({
               const res = await fetch(`/api/sync?profileId=${profile}`);
               
               if (!res.ok) {
+                  if (res.status === 404) {
+                      console.warn("API 端點不存在，使用本地模式（開發環境）");
+                      return;
+                  }
                   throw new Error(`Server responded with ${res.status}`);
+              }
+              
+              const contentType = res.headers.get('content-type');
+              if (!contentType?.includes('application/json')) {
+                  console.warn("伺服器回傳非 JSON 格式，使用本地模式");
+                  return;
               }
               
               const data = await res.json();
               
               if (data && Array.isArray(data) && data.length > 0) {
                   console.log("雲端資料匯入成功！", data);
-                  // 使用 importData 來更新 state
                   get().importData(data);
               } else {
                   console.log("雲端無資料，使用預設值");
+                  // 嘗試從 localStorage 載入備份資料
+                  try {
+                      const backup = localStorage.getItem(`trip_data_${profile}`);
+                      if (backup) {
+                          const backupData = JSON.parse(backup);
+                          if (Array.isArray(backupData) && backupData.length > 0) {
+                              console.log("從本地備份載入資料");
+                              get().importData(backupData);
+                              return;
+                          }
+                      }
+                  } catch (storageError) {
+                      // 忽略 localStorage 錯誤
+                  }
               }
           } catch (e) {
-              console.error("雲端讀取錯誤:", e);
-              // 錯誤時不做中斷，讓使用者可以先用預設值操作，只是可能無法存檔
+              const error = e as Error;
+              if (error.message.includes('JSON') || error.message.includes('Unexpected token')) {
+                  console.warn("API 端點未正確設定，使用本地模式（開發環境）");
+              } else {
+                  console.error("雲端讀取錯誤:", error.message);
+              }
+              // 錯誤時不做中斷，讓使用者可以先用預設值操作
           } finally {
               set({ isSyncing: false });
           }
@@ -241,15 +273,48 @@ const useStore = create<ItineraryStore>((set, get) => ({
 
           set({ isSyncing: true });
           try {
-              const res = await fetch('/api/sync?profileId=' + currentProfile, {
+              const res = await fetch(`/api/sync?profileId=${currentProfile}`, {
                   method: 'POST',
                   headers: { 'Content-Type': 'application/json' },
-                  body: JSON.stringify({ data: trips }) // 包裝資料
+                  body: JSON.stringify({ data: trips })
               });
-              if (!res.ok) throw new Error('儲存失敗');
+              
+              if (!res.ok) {
+                  if (res.status === 404) {
+                      console.warn("API 端點不存在，資料僅儲存在本地（開發環境）");
+                      // 在開發環境中，可以選擇使用 localStorage 作為備份
+                      try {
+                          localStorage.setItem(`trip_data_${currentProfile}`, JSON.stringify(trips));
+                          console.log("資料已儲存至本地 localStorage");
+                      } catch (storageError) {
+                          console.warn("無法使用 localStorage:", storageError);
+                      }
+                      return;
+                  }
+                  throw new Error(`儲存失敗: ${res.status}`);
+              }
+              
+              const contentType = res.headers.get('content-type');
+              if (!contentType?.includes('application/json')) {
+                  console.warn("伺服器回傳非 JSON 格式");
+                  return;
+              }
+              
               console.log("雲端儲存成功！");
           } catch (e) {
-              console.error("雲端儲存錯誤:", e);
+              const error = e as Error;
+              if (error.message.includes('Failed to fetch') || error.message.includes('404')) {
+                  console.warn("API 端點未正確設定，資料僅儲存在本地（開發環境）");
+                  // 開發環境備份到 localStorage
+                  try {
+                      localStorage.setItem(`trip_data_${currentProfile}`, JSON.stringify(trips));
+                      console.log("資料已儲存至本地 localStorage");
+                  } catch (storageError) {
+                      console.warn("無法使用 localStorage:", storageError);
+                  }
+              } else {
+                  console.error("雲端儲存錯誤:", error.message);
+              }
           } finally {
               set({ isSyncing: false });
           }
@@ -513,7 +578,7 @@ const useStore = create<ItineraryStore>((set, get) => ({
       addToCollection: (collectionId, spotData) => set((state) => ({
           collections: state.collections.map(c => {
               if (c.id === collectionId) {
-                  const exists = c.spots.some(s => s.name === spotData.name && Math.abs(s.location.lat - spotData.location.lat) < 0.0001 && Math.abs(s.location.lng - spotData.location.lng) < 0.0001);
+                  const exists = c.spots.some(s => s.name === spotData.name && isSameLocation(s.location, spotData.location));
                   if (exists) return c;
                   return {
                       ...c,
@@ -528,7 +593,9 @@ const useStore = create<ItineraryStore>((set, get) => ({
           collections: state.collections.map(c => 
               c.id === collectionId ? { 
                   ...c, 
-                  spots: c.spots.filter(s => !(s.name === spotName && Math.abs(s.location.lat - lat) < 0.0001 && Math.abs(s.location.lng - lng) < 0.0001)) 
+                  spots: c.spots.filter(s => 
+                      !(s.name === spotName && isSameLocation(s.location, { lat, lng }))
+                  ) 
               } : c
           )
       })),
@@ -554,15 +621,14 @@ const useStore = create<ItineraryStore>((set, get) => ({
 
 // --- 2. API 與 輔助功能 (保持不變) ---
 
-const getMarkerColor = (category: string) => {
-    const map: Record<string, string> = {
-        '觀光景點': '#EF4444', '美食餐廳': '#F97316', '購物行程': '#EAB308', '咖啡廳': '#D97706',
-        '神社/寺廟': '#78716C', '博物館/美術館': '#A855F7', '公園/自然': '#22C55E', '居酒屋/酒吧': '#6366F1',
-        '甜點/下午茶': '#EC4899', '藥妝店': '#3B82F6', '飯店/住宿': '#64748B', '交通/車站': '#0EA5E9',
-        '住宿': '#8B5CF6'
-    };
-    return map[category] || '#9CA3AF';
+const CATEGORY_COLORS: Record<string, string> = {
+    '觀光景點': '#EF4444', '美食餐廳': '#F97316', '購物行程': '#EAB308', '咖啡廳': '#D97706',
+    '神社/寺廟': '#78716C', '博物館/美術館': '#A855F7', '公園/自然': '#22C55E', '居酒屋/酒吧': '#6366F1',
+    '甜點/下午茶': '#EC4899', '藥妝店': '#3B82F6', '飯店/住宿': '#64748B', '交通/車站': '#0EA5E9',
+    '住宿': '#8B5CF6'
 };
+
+const getMarkerColor = (category: string): string => CATEGORY_COLORS[category] || '#9CA3AF';
 
 const getMarkerIcon = (color: string, isBase: boolean = false) => {
     if (isBase) {
@@ -590,37 +656,42 @@ const fetchFlightData = async (flightNo: string) => {
     });
 };
 
-const getGoogleMapsLink = (origin: Spot, dest: Spot) => {
-  const baseUrl = "https://www.google.com/maps/dir/?api=1";
-  const originStr = `${origin.location.lat},${origin.location.lng}`;
-  const destStr = `${dest.location.lat},${dest.location.lng}`;
-  return `${baseUrl}&origin=${originStr}&destination=${destStr}&travelmode=transit`;
+const getGoogleMapsLink = (origin: Spot, dest: Spot): string => {
+    const baseUrl = "https://www.google.com/maps/dir/?api=1";
+    const originStr = `${origin.location.lat},${origin.location.lng}`;
+    const destStr = `${dest.location.lat},${dest.location.lng}`;
+    return `${baseUrl}&origin=${originStr}&destination=${destStr}&travelmode=transit`;
 };
 
-const formatDate = (startDateStr: string, dayOffset: number) => {
-  if (!startDateStr) return "選擇日期";
-  const date = new Date(startDateStr);
-  if (isNaN(date.getTime())) return "無效日期"; 
-  date.setDate(date.getDate() + dayOffset);
-  return date.toLocaleDateString('zh-TW', { month: 'long', day: 'numeric', weekday: 'short' });
+const formatDate = (startDateStr: string, dayOffset: number): string => {
+    if (!startDateStr) return "選擇日期";
+    const date = new Date(startDateStr);
+    if (isNaN(date.getTime())) return "無效日期";
+    date.setDate(date.getDate() + dayOffset);
+    return date.toLocaleDateString('zh-TW', { month: 'long', day: 'numeric', weekday: 'short' });
 };
 
-const getCategoryStyle = (category: string) => {
-    const map: Record<string, string> = {
-        '觀光景點': 'border-red-400 text-red-600 bg-red-50',
-        '美食餐廳': 'border-orange-400 text-orange-600 bg-orange-50',
-        '購物行程': 'border-yellow-400 text-yellow-600 bg-yellow-50',
-        '咖啡廳': 'border-amber-400 text-amber-600 bg-amber-50',
-        '神社/寺廟': 'border-stone-400 text-stone-600 bg-stone-50',
-        '博物館/美術館': 'border-purple-400 text-purple-600 bg-purple-50',
-        '公園/自然': 'border-green-400 text-green-600 bg-green-50',
-        '居酒屋/酒吧': 'border-indigo-400 text-indigo-600 bg-indigo-50',
-        '甜點/下午茶': 'border-pink-400 text-pink-600 bg-pink-50',
-        '藥妝店': 'border-blue-400 text-blue-600 bg-blue-50',
-        '飯店/住宿': 'border-slate-400 text-slate-600 bg-slate-50',
-        '交通/車站': 'border-sky-400 text-sky-600 bg-sky-50',
-    };
-    return map[category] || 'border-gray-400 text-gray-600 bg-gray-50';
+const CATEGORY_STYLES: Record<string, string> = {
+    '觀光景點': 'border-red-400 text-red-600 bg-red-50',
+    '美食餐廳': 'border-orange-400 text-orange-600 bg-orange-50',
+    '購物行程': 'border-yellow-400 text-yellow-600 bg-yellow-50',
+    '咖啡廳': 'border-amber-400 text-amber-600 bg-amber-50',
+    '神社/寺廟': 'border-stone-400 text-stone-600 bg-stone-50',
+    '博物館/美術館': 'border-purple-400 text-purple-600 bg-purple-50',
+    '公園/自然': 'border-green-400 text-green-600 bg-green-50',
+    '居酒屋/酒吧': 'border-indigo-400 text-indigo-600 bg-indigo-50',
+    '甜點/下午茶': 'border-pink-400 text-pink-600 bg-pink-50',
+    '藥妝店': 'border-blue-400 text-blue-600 bg-blue-50',
+    '飯店/住宿': 'border-slate-400 text-slate-600 bg-slate-50',
+    '交通/車站': 'border-sky-400 text-sky-600 bg-sky-50',
+};
+
+const getCategoryStyle = (category: string): string => CATEGORY_STYLES[category] || 'border-gray-400 text-gray-600 bg-gray-50';
+
+// Helper function to check if two locations are the same
+const isSameLocation = (loc1: { lat: number; lng: number }, loc2: { lat: number; lng: number }): boolean => {
+    return Math.abs(loc1.lat - loc2.lat) < LOCATION_TOLERANCE && 
+           Math.abs(loc1.lng - loc2.lng) < LOCATION_TOLERANCE;
 };
 
 const useWeather = (lat: number, lng: number, dateStr: string, dayOffset: number) => {
@@ -695,23 +766,50 @@ const useWeather = (lat: number, lng: number, dateStr: string, dayOffset: number
 
 const SmartTimeInput = ({ value, onChange, placeholder, className }: { value: string, onChange: (val: string) => void, placeholder?: string, className?: string }) => {
     const handleKeyDown = (e: React.KeyboardEvent<HTMLInputElement>) => {
-        if (e.key === 'Enter') {
-            const raw = e.currentTarget.value.replace(/\D/g, '');
-            if (!raw) return;
-            const numVal = parseInt(raw);
-            if (numVal >= 2400) { onChange("23:59"); e.currentTarget.blur(); return; }
-            let hh = 0, mm = 0;
-            if (raw.length <= 2) { hh = parseInt(raw); } 
-            else if (raw.length === 3) { hh = parseInt(raw.substring(0, 1)); mm = parseInt(raw.substring(1)); }
-            else { hh = parseInt(raw.substring(0, 2)); mm = parseInt(raw.substring(2, 4)); }
-            if (hh > 23) hh = 23; if (mm > 59) mm = 59;
-            const formatted = `${hh.toString().padStart(2, '0')}:${mm.toString().padStart(2, '0')}`;
-            onChange(formatted);
+        if (e.key !== 'Enter') return;
+        
+        const raw = e.currentTarget.value.replace(/\D/g, '');
+        if (!raw) return;
+        
+        const numVal = parseInt(raw, 10);
+        if (numVal >= 2400) {
+            onChange("23:59");
             e.currentTarget.blur();
+            return;
         }
+        
+        let hh = 0;
+        let mm = 0;
+        
+        if (raw.length <= 2) {
+            hh = parseInt(raw, 10);
+        } else if (raw.length === 3) {
+            hh = parseInt(raw.substring(0, 1), 10);
+            mm = parseInt(raw.substring(1), 10);
+        } else {
+            hh = parseInt(raw.substring(0, 2), 10);
+            mm = parseInt(raw.substring(2, 4), 10);
+        }
+        
+        hh = Math.min(hh, 23);
+        mm = Math.min(mm, 59);
+        
+        const formatted = `${hh.toString().padStart(2, '0')}:${mm.toString().padStart(2, '0')}`;
+        onChange(formatted);
+        e.currentTarget.blur();
     };
     const defaultClass = "text-[10px] bg-gray-50 border border-transparent hover:border-gray-200 rounded px-1 w-full text-center text-gray-600 focus:border-blue-400 outline-none font-medium transition-all";
-    return ( <input type="text" placeholder={placeholder} className={className || defaultClass} value={value || ''} onChange={(e) => onChange(e.target.value)} onKeyDown={handleKeyDown} /> );
+    
+    return (
+        <input 
+            type="text" 
+            placeholder={placeholder} 
+            className={className || defaultClass} 
+            value={value || ''} 
+            onChange={(e) => onChange(e.target.value)} 
+            onKeyDown={handleKeyDown} 
+        />
+    );
 };
 
 const DestinationInput = ({ value, placeholder, onChange, onLocationSelect }: { value: string, placeholder?: string, onChange: (val: string) => void, onLocationSelect: (lat: number, lng: number, address?: string) => void }) => {
@@ -766,14 +864,14 @@ const DayLocationInput = ({
     );
 };
 
-const CollectionSelector = ({ spot, onClose }: { spot: Spot, onClose: () => void }) => {
+const CollectionSelector = ({ spot }: { spot: Spot, onClose?: () => void }) => {
     const { collections, addToCollection, removeFromCollection, createCollection } = useStore();
     const [newColName, setNewColName] = useState("");
     
-    const checkInCollection = (colId: string) => {
+    const checkInCollection = (colId: string): boolean => {
         const col = collections.find(c => c.id === colId);
         if (!col || !spot.location) return false;
-        return col.spots.some(s => s.name === spot.name && Math.abs(s.location.lat - spot.location.lat) < 0.0001);
+        return col.spots.some(s => s.name === spot.name && isSameLocation(s.location, spot.location));
     };
 
     const handleToggle = (colId: string) => {
@@ -888,8 +986,20 @@ const ChecklistPanel = () => {
     const totalItems = groups.reduce((acc, g) => acc + g.items.length, 0);
     const completedItems = groups.reduce((acc, g) => acc + g.items.filter(i => i.isChecked).length, 0);
     const progress = totalItems > 0 ? Math.round((completedItems / totalItems) * 100) : 0;
-    const handleAddItem = (groupId: string) => { if (newItemTexts[groupId]?.trim()) { addChecklistItem(groupId, newItemTexts[groupId]); setNewItemTexts(prev => ({ ...prev, [groupId]: "" })); } };
-    const handleAddGroup = () => { if (newGroupTitle.trim()) { addChecklistGroup(newGroupTitle); setNewGroupTitle(""); } };
+    const handleAddItem = (groupId: string) => {
+        const text = newItemTexts[groupId]?.trim();
+        if (text) {
+            addChecklistItem(groupId, text);
+            setNewItemTexts(prev => ({ ...prev, [groupId]: "" }));
+        }
+    };
+    
+    const handleAddGroup = () => {
+        if (newGroupTitle.trim()) {
+            addChecklistGroup(newGroupTitle);
+            setNewGroupTitle("");
+        }
+    };
 
     return (
         <div className="flex flex-col h-full bg-gray-50 relative">
@@ -925,7 +1035,16 @@ const ChecklistPanel = () => {
 
 const FlightCard = ({ type, flight, onUpdate }: { type: 'outbound' | 'inbound', flight: FlightInfo, onUpdate: (info: Partial<FlightInfo>) => void }) => {
     const [isLoading, setIsLoading] = useState(false);
-    const handleAutoImport = async () => { if (!flight.flightNo) return; setIsLoading(true); const data = await fetchFlightData(flight.flightNo); setIsLoading(false); if (data) onUpdate(data); };
+    const handleAutoImport = async () => {
+        if (!flight.flightNo) return;
+        setIsLoading(true);
+        try {
+            const data = await fetchFlightData(flight.flightNo);
+            if (data) onUpdate(data);
+        } finally {
+            setIsLoading(false);
+        }
+    };
     return (
         <div className={`mb-3 relative rounded-xl border p-4 shadow-sm transition-all ${type === 'outbound' ? 'bg-gradient-to-r from-blue-50 to-indigo-50 border-blue-200' : 'bg-gradient-to-r from-orange-50 to-red-50 border-orange-200'}`}>
             <div className="flex items-center gap-3">
@@ -953,12 +1072,23 @@ const SpotCard = ({ spot, index, isLast, updateSpot, toggleSpotExpand, removeSpo
     const searchInputRef = useRef<HTMLInputElement>(null);
     const [searchCat, setSearchCat] = useState("");
     
-    const isCollected = collections.some(c => c.spots.some(s => s.name === spot.name && Math.abs(s.location.lat - spot.location.lat) < 0.0001));
+    const isCollected = collections.some(c => 
+        c.spots.some(s => s.name === spot.name && isSameLocation(s.location, spot.location))
+    );
 
     useEffect(() => {
-        const handleClickOutside = (event: MouseEvent) => { if (popoverRef.current && !popoverRef.current.contains(event.target as Node)) { setIsCategoryOpen(false); } };
-        if (isCategoryOpen) { document.addEventListener('mousedown', handleClickOutside); if (searchInputRef.current) searchInputRef.current.focus(); }
-        return () => { document.removeEventListener('mousedown', handleClickOutside); };
+        if (!isCategoryOpen) return;
+        
+        const handleClickOutside = (event: MouseEvent) => {
+            if (popoverRef.current && !popoverRef.current.contains(event.target as Node)) {
+                setIsCategoryOpen(false);
+            }
+        };
+        
+        document.addEventListener('mousedown', handleClickOutside);
+        searchInputRef.current?.focus();
+        
+        return () => document.removeEventListener('mousedown', handleClickOutside);
     }, [isCategoryOpen]);
 
     const style = { transform: CSS.Translate.toString(transform), transition, zIndex: isDragging ? 100 : (isCategoryOpen || isCollectionOpen ? 50 : 'auto'), position: 'relative' as const };
@@ -1019,7 +1149,13 @@ const HeaderControls = ({ onPlacePreview, onMenuClick }: { onPlacePreview: (plac
     const [inputValue, setInputValue] = useState("");
     const autocompleteRef = useRef<google.maps.places.Autocomplete | null>(null);
     const onLoad = (autocomplete: google.maps.places.Autocomplete) => { autocompleteRef.current = autocomplete; };
-    const onPlaceChanged = () => { if (autocompleteRef.current) { const place = autocompleteRef.current.getPlace(); if (!place.geometry || !place.geometry.location) return; onPlacePreview(place); setInputValue(""); } };
+    const onPlaceChanged = () => {
+        if (!autocompleteRef.current) return;
+        const place = autocompleteRef.current.getPlace();
+        if (!place.geometry?.location) return;
+        onPlacePreview(place);
+        setInputValue("");
+    };
     return (
       <div className="absolute top-4 left-4 z-40 flex items-center gap-2 font-sans w-[calc(100%-2rem)] max-w-md pointer-events-none">
          <button onClick={onMenuClick} className="pointer-events-auto p-3 bg-white shadow-lg rounded-lg text-gray-600 hover:text-blue-600 transition-all flex-shrink-0"><Menu size={20} /></button>
@@ -1036,12 +1172,11 @@ const CollectionsPanel = () => {
 
     const colors = ['#EF4444', '#F97316', '#EAB308', '#22C55E', '#3B82F6', '#A855F7', '#EC4899'];
     
-    const handleCreate = () => { 
-        if(newName.trim()) { 
-            const randomColor = colors[Math.floor(Math.random() * colors.length)]; 
-            createCollection(newName, randomColor, selectedIcon); 
-            setNewName(""); 
-        } 
+    const handleCreate = () => {
+        if (!newName.trim()) return;
+        const randomColor = colors[Math.floor(Math.random() * colors.length)];
+        createCollection(newName, randomColor, selectedIcon);
+        setNewName("");
     };
 
     const toggleExpand = (id: string) => {
@@ -1209,8 +1344,8 @@ export default function VacationPlanner() {
         setCurrentDayIndex, addDay, duplicateDay, deleteDay,
         addSpot, removeSpot, reorderSpots, updateSpot, toggleSpotExpand, addCategory,
         updateTripInfo, updateFlight, reorderDays, updateDayInfo,
-        setAccommodation, removeFromCollection,
-        viewMode, setViewMode,
+        setAccommodation,
+        viewMode,
         // ✨ 同步相關
         currentProfile, saveToCloud, isSyncing
     } = useStore();
@@ -1218,9 +1353,7 @@ export default function VacationPlanner() {
     // ✨ 自動儲存邏輯 (Debounce)
     useEffect(() => {
         if (!currentProfile) return;
-        const timer = setTimeout(() => {
-            saveToCloud();
-        }, 2000); // 2秒後自動存檔
+        const timer = setTimeout(() => saveToCloud(), AUTO_SAVE_DELAY);
         return () => clearTimeout(timer);
     }, [trips, currentProfile, saveToCloud]);
 
@@ -1251,10 +1384,22 @@ export default function VacationPlanner() {
     const startResizing = useCallback(() => { setIsResizing(true); }, []);
     const stopResizing = useCallback(() => { setIsResizing(false); }, []);
     const resize = useCallback((e: MouseEvent) => {
-        if (isResizing) { const newWidth = (e.clientX / window.innerWidth) * 100; if (newWidth > 20 && newWidth < 80) { setLeftWidth(newWidth); } }
+        if (!isResizing) return;
+        const newWidth = (e.clientX / window.innerWidth) * 100;
+        if (newWidth > 20 && newWidth < 80) {
+            setLeftWidth(newWidth);
+        }
     }, [isResizing]);
   
-    useEffect(() => { window.addEventListener('mousemove', resize); window.addEventListener('mouseup', stopResizing); return () => { window.removeEventListener('mousemove', resize); window.removeEventListener('mouseup', stopResizing); }; }, [resize, stopResizing]);
+    useEffect(() => {
+        if (!isResizing) return;
+        window.addEventListener('mousemove', resize);
+        window.addEventListener('mouseup', stopResizing);
+        return () => {
+            window.removeEventListener('mousemove', resize);
+            window.removeEventListener('mouseup', stopResizing);
+        };
+    }, [isResizing, resize, stopResizing]);
   
     const onLoadMap = React.useCallback((map: google.maps.Map) => { mapRef.current = map; }, []);
     const onUnmountMap = React.useCallback(() => { mapRef.current = null; }, []);
@@ -1262,11 +1407,25 @@ export default function VacationPlanner() {
     const { isLoaded, loadError } = useJsApiLoader({ googleMapsApiKey: GOOGLE_MAPS_API_KEY, libraries: LIBRARIES, language: 'zh-TW' });
     const sensors = useSensors(useSensor(PointerSensor, { activationConstraint: { distance: 5 } }), useSensor(KeyboardSensor, { coordinateGetter: sortableKeyboardCoordinates }));
   
-    const handleDragEnd = (event: DragEndEvent) => { const { active, over } = event; if (active.id !== over?.id) reorderSpots(active.id as string, over?.id as string); };
-    const handleDestinationSelect = (lat: number, lng: number) => { if (mapRef.current) { mapRef.current.panTo({ lat, lng }); mapRef.current.setZoom(12); } };
+    const handleDragEnd = (event: DragEndEvent) => {
+        const { active, over } = event;
+        if (active.id !== over?.id && over?.id) {
+            reorderSpots(active.id as string, over.id as string);
+        }
+    };
+    
+    const handleDestinationSelect = (lat: number, lng: number) => {
+        if (mapRef.current) {
+            mapRef.current.panTo({ lat, lng });
+            mapRef.current.setZoom(12);
+        }
+    };
     const currentDayData = days[currentDayIndex] || { spots: [] };
     const currentSpots = currentDayData.spots;
-    const mapCenter = useMemo(() => { return currentSpots.length > 0 ? currentSpots[0].location : { lat: 35.6762, lng: 139.6503 }; }, [currentSpots]);
+    const mapCenter = useMemo(() => 
+        currentSpots.length > 0 ? currentSpots[0].location : DEFAULT_MAP_CENTER, 
+        [currentSpots]
+    );
     const { weather, loading: weatherLoading, autoLocationName } = useWeather(mapCenter.lat, mapCenter.lng, startDate, currentDayIndex);
     const displayedLocationName = currentDayData.customLocation || autoLocationName;
   
@@ -1286,28 +1445,44 @@ export default function VacationPlanner() {
           return;
       }
 
-      const event = e as any; 
       setSelectedSpotToRemove(null);
       setSelectedLocation(null);
       setSelectedAccommodation(null); 
       setMapCollectionSelectorOpen(false);
 
+      const event = e as google.maps.MapMouseEvent & { placeId?: string };
+      
       if (event.placeId) {
-          e.stop(); 
+          e.stop();
           if (!mapRef.current) return;
           const service = new google.maps.places.PlacesService(mapRef.current);
-          service.getDetails({ placeId: event.placeId, fields: ['name', 'formatted_address', 'geometry', 'rating', 'website'] }, (place, status) => {
-              if (status === google.maps.places.PlacesServiceStatus.OK && place && place.geometry && place.geometry.location) {
-                  setSelectedLocation({ lat: place.geometry.location.lat(), lng: place.geometry.location.lng(), name: place.name || "未知名稱", address: place.formatted_address || "", placeId: event.placeId, rating: place.rating, website: place.website });
+          service.getDetails(
+              { placeId: event.placeId, fields: ['name', 'formatted_address', 'geometry', 'rating', 'website'] },
+              (place, status) => {
+                  if (status === google.maps.places.PlacesServiceStatus.OK && place?.geometry?.location) {
+                      setSelectedLocation({
+                          lat: place.geometry.location.lat(),
+                          lng: place.geometry.location.lng(),
+                          name: place.name || "未知名稱",
+                          address: place.formatted_address || "",
+                          placeId: event.placeId,
+                          rating: place.rating,
+                          website: place.website
+                      });
+                  }
               }
-          });
+          );
       } else {
           const geocoder = new google.maps.Geocoder();
           geocoder.geocode({ location: { lat, lng } }, (results, status) => {
-              let spotName = `自選地點`;
+              let spotName = "自選地點";
               let address = `${lat.toFixed(4)}, ${lng.toFixed(4)}`;
-              if (status === "OK" && results && results[0]) { address = results[0].formatted_address; const parts = address.split(' '); if (parts.length > 0) spotName = parts[parts.length - 1]; }
-              setSelectedLocation({ lat, lng, name: spotName, address: address });
+              if (status === "OK" && results?.[0]) {
+                  address = results[0].formatted_address;
+                  const parts = address.split(' ');
+                  if (parts.length > 0) spotName = parts[parts.length - 1];
+              }
+              setSelectedLocation({ lat, lng, name: spotName, address });
           });
       }
     }, [isPickingAccommodation]);
@@ -1323,7 +1498,16 @@ export default function VacationPlanner() {
        }
     };
     
-    const handleDayDragEnd = (event: DragEndEvent) => { const { active, over } = event; if (active.id !== over?.id) { const oldIndex = days.findIndex(d => d.id === active.id); const newIndex = days.findIndex(d => d.id === over?.id); reorderDays(oldIndex, newIndex); } };
+    const handleDayDragEnd = (event: DragEndEvent) => {
+        const { active, over } = event;
+        if (active.id !== over?.id && over?.id) {
+            const oldIndex = days.findIndex(d => d.id === active.id);
+            const newIndex = days.findIndex(d => d.id === over.id);
+            if (oldIndex !== -1 && newIndex !== -1) {
+                reorderDays(oldIndex, newIndex);
+            }
+        }
+    };
     const polylinePath = currentSpots.map(s => s.location);
     const currentDateDisplay = formatDate(startDate, currentDayIndex);
     const isFirstDay = currentDayIndex === 0;
@@ -1358,7 +1542,21 @@ export default function VacationPlanner() {
           {!isLoaded ? (<div className="flex h-full w-full items-center justify-center text-gray-500 gap-2"><Loader2 className="animate-spin" /> 地圖載入中...</div>) : (
             <>
               <HeaderControls onMenuClick={() => setSidebarOpen(true)} onPlacePreview={handlePlacePreview} />
-              <GoogleMap mapContainerStyle={{ width: '100%', height: '100%' }} center={mapCenter} zoom={13} options={{ disableDefaultUI: true, zoomControl: true, gestureHandling: 'greedy', draggableCursor: isPickingAccommodation ? 'crosshair' : '' }} onClick={onMapClick} onDragStart={() => setSelectedLocation(null)} onLoad={onLoadMap} onUnmount={onUnmountMap}>
+              <GoogleMap 
+                  mapContainerStyle={{ width: '100%', height: '100%' }} 
+                  center={mapCenter} 
+                  zoom={DEFAULT_ZOOM} 
+                  options={{ 
+                      disableDefaultUI: true, 
+                      zoomControl: true, 
+                      gestureHandling: 'greedy', 
+                      draggableCursor: isPickingAccommodation ? 'crosshair' : '' 
+                  }} 
+                  onClick={onMapClick} 
+                  onDragStart={() => setSelectedLocation(null)} 
+                  onLoad={onLoadMap} 
+                  onUnmount={onUnmountMap}
+              >
                   {accommodation && (
                       <Marker 
                         position={accommodation.location} 
@@ -1417,9 +1615,8 @@ export default function VacationPlanner() {
                           <div className="relative">
                             {(() => {
                                 const existingSpot = currentSpots.find(s => 
-                                    (s.name === selectedLocation.name && 
-                                     Math.abs(s.location.lat - selectedLocation.lat) < 0.0001 && 
-                                     Math.abs(s.location.lng - selectedLocation.lng) < 0.0001)
+                                    s.name === selectedLocation.name && 
+                                    isSameLocation(s.location, { lat: selectedLocation.lat, lng: selectedLocation.lng })
                                 );
                                 const isAdded = !!existingSpot;
 
@@ -1453,7 +1650,12 @@ export default function VacationPlanner() {
                                             }
                                         }}
                                         onHeartClick={() => setMapCollectionSelectorOpen(!mapCollectionSelectorOpen)}
-                                        isCollected={collections.some(c => c.spots.some(s => s.name === selectedLocation.name && Math.abs(s.location.lat - selectedLocation.lat) < 0.0001))}
+                                        isCollected={collections.some(c => 
+                                            c.spots.some(s => 
+                                                s.name === selectedLocation.name && 
+                                                isSameLocation(s.location, { lat: selectedLocation.lat, lng: selectedLocation.lng })
+                                            )
+                                        )}
                                     />
                                 );
                             })()}
@@ -1499,7 +1701,12 @@ export default function VacationPlanner() {
                                   }} 
                                   onAction={() => { removeSpot(selectedSpotToRemove.id); setSelectedSpotToRemove(null); }}
                                   onHeartClick={() => setMapCollectionSelectorOpen(!mapCollectionSelectorOpen)}
-                                  isCollected={collections.some(c => c.spots.some(s => s.name === selectedSpotToRemove.name && Math.abs(s.location.lat - selectedSpotToRemove.location.lat) < 0.0001))}
+                                  isCollected={collections.some(c => 
+                                      c.spots.some(s => 
+                                          s.name === selectedSpotToRemove.name && 
+                                          isSameLocation(s.location, selectedSpotToRemove.location)
+                                      )
+                                  )}
                               />
                               {mapCollectionSelectorOpen && (
                                   <div className="absolute top-0 left-full ml-2">
